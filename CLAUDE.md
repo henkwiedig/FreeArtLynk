@@ -40,19 +40,41 @@ The network is auto configured.
 Device: 192.168.3.99
 Local: 192.168.3.101
 
-To connect using telnet use `telnet 192.168.3.99 1337`
+**Preferred way to run commands on device** — use `nc` directly, not `telnet` (cleaner output):
+```sh
+printf 'command\nexit\n' | nc -w 10 192.168.3.99 1337
+```
 
-Transfering files can be done by the `dump_file` binary.
-Example: dump_file receive 192.168.3.101 /local/path/to/file /usrdata
-Alternatively run a local http server and use wget on the device
+The serial console (`/dev/ttyUSB0`) is flooded with vendor library log output when `arlink_stream` is running. Use the `nc` telnet approach for clean command execution. Commands sent via the serial MCP server still work but output is buried in the log flood.
 
-When running out binary make sure to run it as `arlink_fpv`otherwise the watchdog might restart the board.
+**Transferring files** — preferred method: start a local HTTP server then wget from device:
+```sh
+# On host (from project directory):
+python3 -m http.server 8080 &
+# On device via nc:
+printf 'wget -q http://192.168.3.101:8080/arlink_stream -O /usrdata/arlink_stream && chmod +x /usrdata/arlink_stream && echo OK\nexit\n' | nc -w 30 192.168.3.99 1337
+```
 
-If the device is stuck you can try to restart it useing `printf '\xAA\x05\x00\x1D\x00\x00\xCC\xEB\xAA\x00' | socat - /dev/ttyACM0,b1152000,raw,echo=0`
-This will reboot the device into uboot it will wait whit this message `get_arusb size: 0xb700000 0x10000000@0x20000000`
-You need to hit strg+c quickly twice to get to the uboot promt, then run `reset` do reboot to normal operation.
-When you hit hit Strg+C once it will auto countdown then reset and do a normal boot.
+When running our binary make sure to run it as `arlink_fpv` otherwise the watchdog might restart the board.
+
+If the device is stuck you can try to restart it using:
+```python
+python3 -c "
+import serial, time
+with serial.Serial('/dev/ttyACM0', 1152000, timeout=1) as s:
+    s.write(b'\xAA\x05\x00\x1D\x00\x00\xCC\xEB\xAA\x00')
+    time.sleep(0.5)
+"
+```
 This restart functionality is provided by the original `ota_upgrade` binary.
+This will reboot the device into uboot — it will show `get_arusb size: 0xb700000 0x10000000@0x20000000`.
+
+**IMPORTANT — U-Boot behaviour after OTA reset:**
+- Sending ONE Ctrl+C triggers the autoboot countdown which then tries `mmc` commands → **crashes** with "Synchronous Abort" → board hangs with "### ERROR ### Please RESET the board ###". Do NOT use the single-Ctrl+C path.
+- You must send TWO Ctrl+C quickly to reach the U-Boot prompt, then type `reset` for a normal boot.
+- Send Ctrl+C via the serial MCP server using base64 encoding: `data="Aw=="`, `encoding="base64"`.
+- After the OTA reset, the board may need a second OTA reset if U-Boot crashes the first time.
+- `socat` requires the `dialout` group but ttyACM0 sometimes shows as a regular file after crashes; use `python3 serial` instead which is more reliable.
 
 Writeable locations /usrdata or /tmp
 
@@ -546,10 +568,15 @@ nt99235_cmos_power_on  power_gpio=104 reset_gpio=107
 
 
 
-# Know facts
+# Known facts
 
-- the original firmware transmit not ont but two streams in parallel in 1080p 1920x560 and 1920x552
+- The original firmware transmits two streams in parallel: 1920x560 and 1920x552 (not full 1080p halves — those are the two low-delay pipeline channels).
 - The original firmware is here: https://drive.usercontent.google.com/download?id=1JZ17WKLQK0cysCFlLsHTg7nyBegQhUWG&export=download&authuser=0&confirm=t&uuid=10afa287-97fb-4863-87f6-fdb6de7fe43c&at=ALBwUgkkm5Hpy95UPffEHcGdsx62%3A1776521732029
 - use p1-ota-extract.py to unpack the firmware partitions, then use binwalkv3 to unpack userdata to get the rootfs
-- you cannot run both the original an our instance of the arlink_fpv at the same time
-- after any start of our binary issue a reboot to have a clean boot
+- You cannot run both the original and our instance of arlink_fpv at the same time.
+- After any start of our binary issue a reboot to have a clean state — MPI/VB pool state from a previous run persists in the kernel and causes `AR_MPI_VB_SetConf failed, ret = -1` on the next run without a full reboot.
+- `u8StreamOutEnable` must be `0` — setting it to `1` causes `ArDeviceThread` to call `AR_LDRT_TX_WIRELESS_UsrStreamSend` on every frame, which tries to push onto an uninitialized AR8030 wireless queue (`handle+0xd48`) and returns error -3 in a tight loop.
+- The `run_dbg.sh` startup script auto-restarts the binary if it exits. After killing the process, it will restart immediately — reboot the board rather than trying to kill-and-replace.
+- ISP control functions (`AR_MPI_ISP_Set*TidyAttr`) are available via `dlsym(RTLD_DEFAULT, ...)` since all vendor libs are pre-loaded into the global namespace by `pipeline_load()`. Call them after `PipelineStart()` when the ISP is live.
+- AWB and AEC use a Get+Set pattern with a 256-byte opaque buffer. Get first to preserve unknown fields, patch the mode/value bytes, then Set.
+- `AR_LDRT_TX_PIPELINE_RoiEnable(enable, width, height)` performs a VIN→VENC crop for zoom and aspect ratio adjustment.

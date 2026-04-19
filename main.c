@@ -98,8 +98,17 @@ typedef struct {
     int      kbps;
     int      gop;
     char     lib_path[256];
-    int      flip;    /* vertical flip (ISP) */
-    int      mirror;  /* horizontal mirror (ISP) */
+    /* ISP image controls — -1 means "leave at hardware default" */
+    int      flip;        /* vertical flip */
+    int      mirror;      /* horizontal mirror */
+    int      saturation;  /* 0-100 */
+    int      sharpness;   /* 0-100 */
+    int      wb;          /* -1 = auto, >0 = manual CCT in Kelvin */
+    int      ev_us;       /* -1 = auto AEC, >0 = manual exposure in µs */
+    int      dnr3d;       /* 0 = off, 1 = on */
+    int      dnr2d;       /* 0 = off, 1 = on */
+    float    zoom;        /* 1.0 = no zoom, >1.0 = zoom in */
+    int      aspect;      /* 0 = 16:9 (default), 1 = 4:3 */
 } CONFIG_S;
 
 static void config_defaults(CONFIG_S *c)
@@ -108,13 +117,21 @@ static void config_defaults(CONFIG_S *c)
     strncpy(c->lib_path, "/usr/lib/libldrt_pipeline.so", sizeof(c->lib_path) - 1);
     c->dest_port  = 5600;
     c->dest_port2 = 5601;
-    c->width     = 1920;
-    c->height    = 1080;
-    c->fps       = 60;
-    c->kbps      = 4000;
-    c->gop       = 60;
-    c->flip      = 0;
-    c->mirror    = 0;
+    c->width      = 1920;
+    c->height     = 1080;
+    c->fps        = 60;
+    c->kbps       = 4000;
+    c->gop        = 60;
+    c->flip       = 0;
+    c->mirror     = 0;
+    c->saturation = -1;
+    c->sharpness  = -1;
+    c->wb         = -2;   /* sentinel: unchanged */
+    c->ev_us      = -2;   /* sentinel: unchanged */
+    c->dnr3d      = -1;
+    c->dnr2d      = -1;
+    c->zoom       = 1.0f;
+    c->aspect     = 0;
 }
 
 static void parse_args(int argc, char **argv, CONFIG_S *c)
@@ -127,17 +144,25 @@ static void parse_args(int argc, char **argv, CONFIG_S *c)
 
         /* key-value pairs */
         if (i + 1 >= argc) break;
-        if      (!strcmp(argv[i], "-i")) strncpy(c->dest_ip,  argv[i+1], sizeof(c->dest_ip)  - 1);
-        else if (!strcmp(argv[i], "-p")) c->dest_port  = (uint16_t)atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-q")) c->dest_port2 = (uint16_t)atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-w")) c->width     = atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-h")) c->height    = atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-f")) c->fps       = atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-b")) c->kbps      = atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-g")) c->gop       = atoi(argv[i+1]);
-        else if (!strcmp(argv[i], "-l")) strncpy(c->lib_path, argv[i+1], sizeof(c->lib_path) - 1);
-        else { continue; }  /* unknown flag, don't skip next arg */
-        i++;  /* consumed argv[i+1] */
+        if      (!strcmp(argv[i], "-i"))          strncpy(c->dest_ip, argv[i+1], sizeof(c->dest_ip) - 1);
+        else if (!strcmp(argv[i], "-p"))          c->dest_port  = (uint16_t)atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-q"))          c->dest_port2 = (uint16_t)atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-w"))          c->width      = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-h"))          c->height     = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-f"))          c->fps        = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-b"))          c->kbps       = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-g"))          c->gop        = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-l"))          strncpy(c->lib_path, argv[i+1], sizeof(c->lib_path) - 1);
+        else if (!strcmp(argv[i], "-saturation")) c->saturation = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-sharpness"))  c->sharpness  = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-wb"))         c->wb  = strcmp(argv[i+1], "auto") ? atoi(argv[i+1]) : -1;
+        else if (!strcmp(argv[i], "-ev"))         c->ev_us = strcmp(argv[i+1], "auto") ? atoi(argv[i+1]) : -1;
+        else if (!strcmp(argv[i], "-dnr3d"))      c->dnr3d = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-dnr2d"))      c->dnr2d = atoi(argv[i+1]);
+        else if (!strcmp(argv[i], "-zoom"))       c->zoom  = strtof(argv[i+1], NULL);
+        else if (!strcmp(argv[i], "-aspect"))     c->aspect = (strcmp(argv[i+1], "43") == 0) ? 1 : 0;
+        else { continue; }  /* unknown flag — don't skip next arg */
+        i++;
     }
 }
 
@@ -265,27 +290,141 @@ static int32_t dev_rst_stream(int32_t dev_id)
 
 /* ------------------------------------------------------------------ */
 
-typedef struct { uint32_t state; uint32_t ch_id; } ISP_STATE_ATTR_S;
+/*
+ * ISP attribute structs from Ghidra analysis of AR_LOWDELAY_TX_SYSCTRL_SetCameraInfo.
+ * Simple scalar attrs: single uint32_t field.
+ * Complex attrs (AWB, AEC): use a 256-byte opaque buffer with Get+Set.
+ *
+ * Enum values (0=AUTO/OFF, 1=MANUAL/ON follow C convention):
+ *   AWB:  0=auto, 1=manual  AEC:  0=auto, 1=manual
+ *   2D DNR noise_type: 0=LUMA, 1=CHROMA
+ */
 
-static void isp_set_flip_mirror(int flip, int mirror)
+typedef struct { uint32_t state;   uint32_t ch_id; } ISP_STATE_ATTR_S;
+typedef struct { uint32_t value;                   } ISP_U32_ATTR_S;
+typedef struct { uint32_t type;    uint32_t strength; } ISP_DE2D_STRENGTH_S;
+typedef struct { ISP_DE2D_STRENGTH_S stDe2dStrength; } ISP_DE2D_ATTR_S;
+
+#define ISP_AWB_MODE_AUTO   0
+#define ISP_AWB_MODE_MANUAL 1
+#define ISP_AEC_MODE_AUTO   0
+#define ISP_AEC_MODE_MANUAL 1
+#define ISP_NOISE_LUMA      0
+#define ISP_NOISE_CHROMA    1
+
+static int isp_call1(const char *sym, int pipe, void *attr)
 {
-    typedef int (*isp_fn_t)(int pipe, ISP_STATE_ATTR_S *attr);
-    isp_fn_t fn_flip   = (isp_fn_t)dlsym(RTLD_DEFAULT, "AR_MPI_ISP_SetFlipStateTidyAttr");
-    isp_fn_t fn_mirror = (isp_fn_t)dlsym(RTLD_DEFAULT, "AR_MPI_ISP_SetMirrorStateTidyAttr");
+    typedef int (*fn_t)(int, void *);
+    fn_t fn = (fn_t)dlsym(RTLD_DEFAULT, sym);
+    if (!fn) { fprintf(stderr, "[isp] %s not found\n", sym); return -1; }
+    return fn(pipe, attr);
+}
 
-    if (fn_flip) {
-        ISP_STATE_ATTR_S a = { (uint32_t)flip, 0 };
-        fn_flip(0, &a);
-        printf("[isp] flip=%d\n", flip);
-    } else {
-        fprintf(stderr, "[isp] AR_MPI_ISP_SetFlipStateTidyAttr not found\n");
+static void isp_apply_settings(const CONFIG_S *cfg, LDRT_API_S *api)
+{
+    /* --- flip / mirror ------------------------------------------------ */
+    if (cfg->flip || cfg->mirror) {
+        if (cfg->flip) {
+            ISP_STATE_ATTR_S a = { (uint32_t)cfg->flip, 0 };
+            isp_call1("AR_MPI_ISP_SetFlipStateTidyAttr", 0, &a);
+            printf("[isp] flip=%d\n", cfg->flip);
+        }
+        if (cfg->mirror) {
+            ISP_STATE_ATTR_S a = { (uint32_t)cfg->mirror, 0 };
+            isp_call1("AR_MPI_ISP_SetMirrorStateTidyAttr", 0, &a);
+            printf("[isp] mirror=%d\n", cfg->mirror);
+        }
     }
-    if (fn_mirror) {
-        ISP_STATE_ATTR_S a = { (uint32_t)mirror, 0 };
-        fn_mirror(0, &a);
-        printf("[isp] mirror=%d\n", mirror);
-    } else {
-        fprintf(stderr, "[isp] AR_MPI_ISP_SetMirrorStateTidyAttr not found\n");
+
+    /* --- saturation --------------------------------------------------- */
+    if (cfg->saturation >= 0) {
+        ISP_U32_ATTR_S a = { (uint32_t)cfg->saturation };
+        isp_call1("AR_MPI_ISP_SetSaturationTidyAttr", 0, &a);
+        printf("[isp] saturation=%d\n", cfg->saturation);
+    }
+
+    /* --- sharpness ---------------------------------------------------- */
+    if (cfg->sharpness >= 0) {
+        ISP_U32_ATTR_S a = { (uint32_t)cfg->sharpness };
+        isp_call1("AR_MPI_ISP_SetSharpnessTidyAttr", 0, &a);
+        printf("[isp] sharpness=%d\n", cfg->sharpness);
+    }
+
+    /* --- white balance ------------------------------------------------ */
+    if (cfg->wb != -2) {
+        /* Struct layout: [0] awb_mode (u32), [4] cct (u32), [8+] gains (floats) */
+        uint8_t buf[256];
+        memset(buf, 0, sizeof(buf));
+        isp_call1("AR_MPI_ISP_GetAwbManuTidyAttr", 0, buf);
+        if (cfg->wb == -1) {
+            *(uint32_t *)(buf + 0) = ISP_AWB_MODE_AUTO;
+            printf("[isp] wb=auto\n");
+        } else {
+            *(uint32_t *)(buf + 0) = ISP_AWB_MODE_MANUAL;
+            *(uint32_t *)(buf + 4) = (uint32_t)cfg->wb;
+            printf("[isp] wb=manual cct=%dK\n", cfg->wb);
+        }
+        isp_call1("AR_MPI_ISP_SetAwbManuTidyAttr", 0, buf);
+    }
+
+    /* --- exposure (EV) ------------------------------------------------ */
+    if (cfg->ev_us != -2) {
+        /* Struct layout: [0] aec_mode (u32), [4] gain (float), [8] exp_time_us (float) */
+        uint8_t buf[256];
+        memset(buf, 0, sizeof(buf));
+        isp_call1("AR_MPI_ISP_GetAecManuTidyAttr", 0, buf);
+        if (cfg->ev_us == -1) {
+            *(uint32_t *)(buf + 0) = ISP_AEC_MODE_AUTO;
+            printf("[isp] ev=auto\n");
+        } else {
+            float exp = (float)cfg->ev_us;
+            *(uint32_t *)(buf + 0) = ISP_AEC_MODE_MANUAL;
+            memcpy(buf + 8, &exp, 4);
+            printf("[isp] ev=manual exp_time=%dµs\n", cfg->ev_us);
+        }
+        isp_call1("AR_MPI_ISP_SetAecManuTidyAttr", 0, buf);
+    }
+
+    /* --- 3D denoising ------------------------------------------------- */
+    if (cfg->dnr3d >= 0) {
+        ISP_U32_ATTR_S a = { cfg->dnr3d ? 50u : 0u };
+        isp_call1("AR_MPI_ISP_SetDe3dStrengthTidyAttr", 0, &a);
+        printf("[isp] dnr3d=%d (strength=%u)\n", cfg->dnr3d, a.value);
+    }
+
+    /* --- 2D denoising ------------------------------------------------- */
+    if (cfg->dnr2d >= 0) {
+        uint32_t strength = cfg->dnr2d ? 50u : 0u;
+        ISP_DE2D_ATTR_S luma  = { { ISP_NOISE_LUMA,   strength } };
+        ISP_DE2D_ATTR_S chroma = { { ISP_NOISE_CHROMA, strength } };
+        isp_call1("AR_MPI_ISP_SetDe2dStrengthTidyAttr", 0, &luma);
+        isp_call1("AR_MPI_ISP_SetDe2dStrengthTidyAttr", 0, &chroma);
+        printf("[isp] dnr2d=%d (strength=%u)\n", cfg->dnr2d, strength);
+    }
+
+    /* --- zoom + aspect ratio (via VENC ROI crop) ---------------------- */
+    if (cfg->zoom > 1.0f || cfg->aspect == 1) {
+        /* Base dimensions for the requested aspect ratio */
+        uint32_t base_w, base_h;
+        if (cfg->aspect == 1) {
+            base_h = (uint32_t)cfg->height;
+            base_w = ((uint32_t)cfg->height * 4u / 3u) & ~1u;  /* e.g. 1080 → 1440 */
+        } else {
+            base_w = (uint32_t)cfg->width;
+            base_h = (uint32_t)cfg->height;
+        }
+        /* Apply zoom on top of the aspect crop */
+        uint32_t crop_w = ((uint32_t)((float)base_w / cfg->zoom)) & ~1u;
+        uint32_t crop_h = ((uint32_t)((float)base_h / cfg->zoom)) & ~1u;
+        if (crop_w > 0 && crop_h > 0 &&
+            crop_w <= (uint32_t)cfg->width && crop_h <= (uint32_t)cfg->height) {
+            api->PipelineRoiEnable(1, crop_w, crop_h);
+            printf("[isp] roi %ux%u (zoom=%.2f aspect=%s)\n",
+                   crop_w, crop_h, (double)cfg->zoom,
+                   cfg->aspect ? "4:3" : "16:9");
+        } else {
+            fprintf(stderr, "[isp] invalid roi %ux%u, skipping\n", crop_w, crop_h);
+        }
     }
 }
 
@@ -530,9 +669,8 @@ int main(int argc, char **argv)
     /* 8. Start pipeline — ArDeviceThread starts calling dev_video_send */
     api.PipelineStart(0);
 
-    /* Apply flip/mirror after ISP is running */
-    if (cfg.flip || cfg.mirror)
-        isp_set_flip_mirror(cfg.flip, cfg.mirror);
+    /* Apply ISP settings after pipeline is running */
+    isp_apply_settings(&cfg, &api);
 
     /* Request an IDR on startup so the receiver can decode immediately */
     api.PipelineIdrEnable();

@@ -222,6 +222,7 @@ typedef int (*fn_AR_LDRT_TX_VENC_ReleaseStream)(int chn, LDRT_STREAM_BUF_S *buf)
 typedef int (*fn_AR_LDRT_TX_VENC_RequestIdr)(int chn);
 typedef int (*fn_AR_LDRT_TX_VencGetThreadStop)(void);
 typedef int (*fn_AR_LDRT_TX_VencSendThreadStop)(void);
+typedef void (*fn_AR_LDRT_TX_PIPELINE_RoiEnable)(uint32_t enable, uint32_t width, uint32_t height);
 
 typedef struct {
     void *handle;
@@ -234,6 +235,7 @@ typedef struct {
     fn_AR_LDRT_TX_PIPELINE_Start      PipelineStart;
     fn_AR_LDRT_TX_PIPELINE_Stop       PipelineStop;
     fn_AR_LDRT_TX_PIPELINE_IdrEnable  PipelineIdrEnable;
+    fn_AR_LDRT_TX_PIPELINE_RoiEnable  PipelineRoiEnable;
     fn_AR_LDRT_TX_VENC_GetFd          VencGetFd;
     fn_AR_LDRT_TX_VENC_GetStream      VencGetStream;
     fn_AR_LDRT_TX_VENC_ReleaseStream  VencReleaseStream;

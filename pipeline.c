@@ -143,6 +143,7 @@ int pipeline_load(LDRT_API_S *api, const char *lib_path)
     LOAD_SYM_EXACT(api, api->handle, PipelineStart,      "AR_LDRT_TX_PIPELINE_Start");
     LOAD_SYM_EXACT(api, api->handle, PipelineStop,       "AR_LDRT_TX_PIPELINE_Stop");
     LOAD_SYM_EXACT(api, api->handle, PipelineIdrEnable,  "AR_LDRT_TX_PIPELINE_IdrEnable");
+    LOAD_SYM_EXACT(api, api->handle, PipelineRoiEnable,  "AR_LDRT_TX_PIPELINE_RoiEnable");
     LOAD_SYM_EXACT(api, api->handle, VencGetFd,          "AR_LDRT_TX_VENC_GetFd");
     LOAD_SYM_EXACT(api, api->handle, VencGetStream,      "AR_LDRT_TX_VENC_GetStream");
     LOAD_SYM_EXACT(api, api->handle, VencReleaseStream,  "AR_LDRT_TX_VENC_ReleaseStream");
