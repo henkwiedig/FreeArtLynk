@@ -134,6 +134,39 @@ static void config_defaults(CONFIG_S *c)
     c->aspect     = 0;
 }
 
+static void print_usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s [options]\n"
+        "\n"
+        "Stream options:\n"
+        "  -i <ip>         Destination IP          (default: 192.168.3.101)\n"
+        "  -p <port>       RTP port ch0            (default: 5600)\n"
+        "  -q <port>       RTP port ch1            (default: 5601)\n"
+        "  -w <width>      Capture width px        (default: 1920)\n"
+        "  -h <height>     Capture height px       (default: 1080)\n"
+        "  -f <fps>        Frame rate              (default: 60)\n"
+        "  -b <kbps>       Bitrate kbps            (default: 4000)\n"
+        "  -g <gop>        GOP size                (default: 60)\n"
+        "  -l <path>       Pipeline lib path       (default: /usr/lib/libldrt_pipeline.so)\n"
+        "\n"
+        "ISP / image options:\n"
+        "  -flip           Vertical flip\n"
+        "  -mirror         Horizontal mirror\n"
+        "  -rotate         180° rotation (flip + mirror)\n"
+        "  -saturation <0-100>   Saturation\n"
+        "  -sharpness  <0-100>   Sharpness\n"
+        "  -wb <K|auto>          White balance CCT in Kelvin or 'auto'\n"
+        "  -ev <us|auto>         Exposure time in µs or 'auto'\n"
+        "  -dnr3d <0|1>          3D denoising off/on\n"
+        "  -dnr2d <0|1>          2D denoising off/on\n"
+        "  -zoom <1.0+>          Digital zoom (>1.0 = zoom in)\n"
+        "  -aspect <169|43>      Aspect ratio crop: 169=16:9 (default), 43=4:3\n"
+        "\n"
+        "  --help / -?     Show this help\n",
+        prog);
+}
+
 static void parse_args(int argc, char **argv, CONFIG_S *c)
 {
     for (int i = 1; i < argc; i++) {
@@ -141,6 +174,9 @@ static void parse_args(int argc, char **argv, CONFIG_S *c)
         if      (!strcmp(argv[i], "-flip"))   { c->flip   = 1; continue; }
         else if (!strcmp(argv[i], "-mirror")) { c->mirror = 1; continue; }
         else if (!strcmp(argv[i], "-rotate")) { c->flip   = 1; c->mirror = 1; continue; }
+        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-?")) {
+            print_usage(argv[0]); exit(0);
+        }
 
         /* key-value pairs */
         if (i + 1 >= argc) break;
