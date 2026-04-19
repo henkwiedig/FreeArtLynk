@@ -15,7 +15,7 @@ STRIP   := $(TOOLCHAIN_BIN)/aarch64-linux-gnu-strip
 
 TARGET  := arlink_stream
 
-SRCS    := main.c pipeline.c rtp_h265.c udp_sender.c
+SRCS    := main.c pipeline.c rtp_h265.c udp_sender.c http_api.c
 OBJS    := $(SRCS:.c=.o)
 
 CFLAGS  := -O2 -Wall -Wextra -std=c99 \

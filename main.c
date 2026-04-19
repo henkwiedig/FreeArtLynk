@@ -49,9 +49,11 @@ int check_cert(const char *pem_path, const char *cert_blob,
     return 0;
 }
 
+#include "config.h"
 #include "pipeline.h"
 #include "rtp_h265.h"
 #include "udp_sender.h"
+#include "http_api.h"
 
 /* ------------------------------------------------------------------ */
 
@@ -88,29 +90,6 @@ static void watchdog_open(void)
 
 /* ------------------------------------------------------------------ */
 
-typedef struct {
-    char     dest_ip[64];
-    uint16_t dest_port;
-    uint16_t dest_port2;
-    int      width;
-    int      height;
-    int      fps;
-    int      kbps;
-    int      gop;
-    char     lib_path[256];
-    /* ISP image controls — -1 means "leave at hardware default" */
-    int      flip;        /* vertical flip */
-    int      mirror;      /* horizontal mirror */
-    int      saturation;  /* 0-100 */
-    int      sharpness;   /* 0-100 */
-    int      wb;          /* -1 = auto, >0 = manual CCT in Kelvin */
-    int      ev_us;       /* -1 = auto AEC, >0 = manual exposure in µs */
-    int      dnr3d;       /* 0 = off, 1 = on */
-    int      dnr2d;       /* 0 = off, 1 = on */
-    float    zoom;        /* 1.0 = no zoom, >1.0 = zoom in */
-    int      aspect;      /* 0 = 16:9 (default), 1 = 4:3 */
-} CONFIG_S;
-
 static void config_defaults(CONFIG_S *c)
 {
     strncpy(c->dest_ip,  "192.168.3.101",              sizeof(c->dest_ip)  - 1);
@@ -132,6 +111,7 @@ static void config_defaults(CONFIG_S *c)
     c->dnr2d      = -1;
     c->zoom       = 1.0f;
     c->aspect     = 0;
+    c->http_port  = 8080;
 }
 
 static void print_usage(const char *prog)
@@ -162,6 +142,9 @@ static void print_usage(const char *prog)
         "  -dnr2d <0|1>          2D denoising off/on\n"
         "  -zoom <1.0+>          Digital zoom (>1.0 = zoom in)\n"
         "  -aspect <169|43>      Aspect ratio crop: 169=16:9 (default), 43=4:3\n"
+        "\n"
+        "HTTP options:\n"
+        "  -P <port>       HTTP API port            (default: 8080, 0=disabled)\n"
         "\n"
         "  --help / -?     Show this help\n",
         prog);
@@ -197,6 +180,7 @@ static void parse_args(int argc, char **argv, CONFIG_S *c)
         else if (!strcmp(argv[i], "-dnr2d"))      c->dnr2d = atoi(argv[i+1]);
         else if (!strcmp(argv[i], "-zoom"))       c->zoom  = strtof(argv[i+1], NULL);
         else if (!strcmp(argv[i], "-aspect"))     c->aspect = (strcmp(argv[i+1], "43") == 0) ? 1 : 0;
+        else if (!strcmp(argv[i], "-P"))          c->http_port = atoi(argv[i+1]);
         else { continue; }  /* unknown flag — don't skip next arg */
         i++;
     }
@@ -711,12 +695,22 @@ int main(int argc, char **argv)
     /* Request an IDR on startup so the receiver can decode immediately */
     api.PipelineIdrEnable();
 
+    /* Start HTTP API server if enabled */
+    HTTP_API_S http_api;
+    memset(&http_api, 0, sizeof(http_api));
+    http_api.cfg = &cfg;
+    http_api.api = &api;
+    if (cfg.http_port > 0)
+        http_api_start(&http_api);
+
     printf("[main] streaming %dx%d@%d fps  %d kbps  H.265\n"
            "       ch0 -> %s:%u\n"
            "       ch1 -> %s:%u\n",
            cfg.width, cfg.height, cfg.fps, cfg.kbps,
            cfg.dest_ip, cfg.dest_port,
            cfg.dest_ip, cfg.dest_port2);
+    if (cfg.http_port > 0)
+        printf("       http -> http://0.0.0.0:%d/\n", cfg.http_port);
 
     /* 9. Main loop — frames delivered via dev_video_send callback */
     while (g_running)
@@ -724,6 +718,9 @@ int main(int argc, char **argv)
 
     printf("[main] shutting down after ch0=%ld ch1=%ld frames\n",
            g_stream.frame_count, g_stream2.frame_count);
+
+    if (cfg.http_port > 0)
+        http_api_stop(&http_api);
 
     g_stream_ready = 0;
     udp_sender_close(&g_stream.udp);
