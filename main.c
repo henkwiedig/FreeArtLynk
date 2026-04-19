@@ -7,6 +7,7 @@
  * Usage:
  *   arlink_stream [-i <dest_ip>] [-p <dest_port>] [-w <width>] [-h <height>]
  *                 [-f <fps>] [-b <kbps>] [-g <gop>] [-l <lib_path>]
+ *                 [-flip] [-mirror] [-rotate]
  *
  * Defaults:
  *   dest_ip   = 192.168.0.1
@@ -17,6 +18,10 @@
  *   kbps      = 4000
  *   gop       = 60
  *   lib_path  = /usr/lib/libldrt_pipeline.so
+ *
+ * -flip   : vertical flip via ISP
+ * -mirror : horizontal mirror via ISP
+ * -rotate : both flip+mirror (= 180° rotation, matches original u16Rotation=1)
  */
 
 #include <stdio.h>
@@ -93,6 +98,8 @@ typedef struct {
     int      kbps;
     int      gop;
     char     lib_path[256];
+    int      flip;    /* vertical flip (ISP) */
+    int      mirror;  /* horizontal mirror (ISP) */
 } CONFIG_S;
 
 static void config_defaults(CONFIG_S *c)
@@ -106,11 +113,20 @@ static void config_defaults(CONFIG_S *c)
     c->fps       = 60;
     c->kbps      = 4000;
     c->gop       = 60;
+    c->flip      = 0;
+    c->mirror    = 0;
 }
 
 static void parse_args(int argc, char **argv, CONFIG_S *c)
 {
-    for (int i = 1; i < argc - 1; i += 2) {
+    for (int i = 1; i < argc; i++) {
+        /* boolean flags (no argument) */
+        if      (!strcmp(argv[i], "-flip"))   { c->flip   = 1; continue; }
+        else if (!strcmp(argv[i], "-mirror")) { c->mirror = 1; continue; }
+        else if (!strcmp(argv[i], "-rotate")) { c->flip   = 1; c->mirror = 1; continue; }
+
+        /* key-value pairs */
+        if (i + 1 >= argc) break;
         if      (!strcmp(argv[i], "-i")) strncpy(c->dest_ip,  argv[i+1], sizeof(c->dest_ip)  - 1);
         else if (!strcmp(argv[i], "-p")) c->dest_port  = (uint16_t)atoi(argv[i+1]);
         else if (!strcmp(argv[i], "-q")) c->dest_port2 = (uint16_t)atoi(argv[i+1]);
@@ -120,6 +136,8 @@ static void parse_args(int argc, char **argv, CONFIG_S *c)
         else if (!strcmp(argv[i], "-b")) c->kbps      = atoi(argv[i+1]);
         else if (!strcmp(argv[i], "-g")) c->gop       = atoi(argv[i+1]);
         else if (!strcmp(argv[i], "-l")) strncpy(c->lib_path, argv[i+1], sizeof(c->lib_path) - 1);
+        else { continue; }  /* unknown flag, don't skip next arg */
+        i++;  /* consumed argv[i+1] */
     }
 }
 
@@ -243,6 +261,32 @@ static int32_t dev_video_send(int32_t dev_id, uint8_t *data, uint32_t len, uint3
 static int32_t dev_rst_stream(int32_t dev_id)
 {
     (void)dev_id; return 0;
+}
+
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint32_t state; uint32_t ch_id; } ISP_STATE_ATTR_S;
+
+static void isp_set_flip_mirror(int flip, int mirror)
+{
+    typedef int (*isp_fn_t)(int pipe, ISP_STATE_ATTR_S *attr);
+    isp_fn_t fn_flip   = (isp_fn_t)dlsym(RTLD_DEFAULT, "AR_MPI_ISP_SetFlipStateTidyAttr");
+    isp_fn_t fn_mirror = (isp_fn_t)dlsym(RTLD_DEFAULT, "AR_MPI_ISP_SetMirrorStateTidyAttr");
+
+    if (fn_flip) {
+        ISP_STATE_ATTR_S a = { (uint32_t)flip, 0 };
+        fn_flip(0, &a);
+        printf("[isp] flip=%d\n", flip);
+    } else {
+        fprintf(stderr, "[isp] AR_MPI_ISP_SetFlipStateTidyAttr not found\n");
+    }
+    if (fn_mirror) {
+        ISP_STATE_ATTR_S a = { (uint32_t)mirror, 0 };
+        fn_mirror(0, &a);
+        printf("[isp] mirror=%d\n", mirror);
+    } else {
+        fprintf(stderr, "[isp] AR_MPI_ISP_SetMirrorStateTidyAttr not found\n");
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -400,7 +444,7 @@ int main(int argc, char **argv)
     AR_LDRT_PIPE_TX_MODULE_PARAMS_S mod;
     memset(&mod, 0, sizeof(mod));
 
-    mod.u8StreamOutEnable = 1;
+    mod.u8StreamOutEnable = 0;  /* no AR8030 BB — disables wireless queue path in ArDeviceThread */
     mod.stArInputInfo.eInputMode = AR_LDRT_VIN_INPUT_MODE;
 
     if (sensor_probe_vin(&mod.stArLdrtVi, cfg.width, cfg.height,
@@ -485,6 +529,10 @@ int main(int argc, char **argv)
 
     /* 8. Start pipeline — ArDeviceThread starts calling dev_video_send */
     api.PipelineStart(0);
+
+    /* Apply flip/mirror after ISP is running */
+    if (cfg.flip || cfg.mirror)
+        isp_set_flip_mirror(cfg.flip, cfg.mirror);
 
     /* Request an IDR on startup so the receiver can decode immediately */
     api.PipelineIdrEnable();
